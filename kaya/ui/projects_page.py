@@ -319,7 +319,9 @@ class ProjectTree(QtWidgets.QTreeView):
 
         self.setModel(proxy)
         self.setRootIndex(proxy.mapFromSource(fs_model.index(str(proj_dir))))
-        self.setEditTriggers(QtWidgets.QAbstractItemView.EditKeyPressed)
+        # Explorer yalnızca içerik gezgini; yanlışlıkla proje/dosya adını
+        # inline-rename ile değiştirmeyi önlemek için düzenlemeyi kapat.
+        self.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.setColumnWidth(0, 260)
         self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._ctx_menu)
@@ -448,6 +450,10 @@ class ProjectDetail(QtWidgets.QWidget):
         super().__init__(parent)
         self.proj_dir = proj_dir; self.meta = meta
         self._loading_note = False
+        self.notes_dir = self.proj_dir / "notes"
+        self.gallery_dir = self.proj_dir / "assets" / "images"
+        self._gallery_files: list[Path] = []
+        self._gallery_index = -1
 
         outer = QtWidgets.QVBoxLayout(self); outer.setContentsMargins(8,8,8,8); outer.setSpacing(8)
         top = QtWidgets.QHBoxLayout()
@@ -469,12 +475,17 @@ class ProjectDetail(QtWidgets.QWidget):
         self.tree = ProjectTree(proj_dir, self.fs_model, self.proxy, self)
         split.addWidget(self.tree)
 
-        # Sağ taraf: Not çalışma alanı + görsel görüntüleyici
+        # Sağ taraf: mini-workspace (Notes + Gallery)
         right = QtWidgets.QWidget()
         right_v = QtWidgets.QVBoxLayout(right); right_v.setContentsMargins(0,0,0,0); right_v.setSpacing(6)
 
+        self.workspace_tabs = QtWidgets.QTabWidget()
+
+        notes_tab = QtWidgets.QWidget()
+        notes_v = QtWidgets.QVBoxLayout(notes_tab); notes_v.setContentsMargins(0, 0, 0, 0); notes_v.setSpacing(6)
+
         tools = QtWidgets.QHBoxLayout()
-        self.file_lbl = QtWidgets.QLabel("overview.md")
+        self.file_lbl = QtWidgets.QLabel("notes/overview.md")
         self.file_lbl.setStyleSheet("color:#7CE3C2; font-weight:700;")
         self.btn_attach = QtWidgets.QToolButton(text="Attach")
         self.btn_attach.setObjectName("navbtn")
@@ -486,7 +497,7 @@ class ProjectDetail(QtWidgets.QWidget):
         tools.addStretch(1)
         for b in (self.btn_attach, self.btn_insert_img, self.btn_save):
             tools.addWidget(b)
-        right_v.addLayout(tools)
+        notes_v.addLayout(tools)
 
         self.stack = QtWidgets.QStackedWidget()
         # 0) Editor workspace (Editor + Preview)
@@ -501,7 +512,6 @@ class ProjectDetail(QtWidgets.QWidget):
         self.editor_workspace.setSizes([520, 240])
         self._tm = QtCore.QTimer(self); self._tm.setInterval(600); self._tm.setSingleShot(True)
         self._tm.timeout.connect(self._save)
-        self._note_path = proj_dir / "overview.md"
         self.editor.textChanged.connect(self._on_editor_changed)
         self.stack.addWidget(self.editor_workspace)
 
@@ -509,7 +519,38 @@ class ProjectDetail(QtWidgets.QWidget):
         self.viewer = ImageViewer(self)
         self.stack.addWidget(self.viewer)
 
-        right_v.addWidget(self.stack, 1)
+        notes_v.addWidget(self.stack, 1)
+        self.workspace_tabs.addTab(notes_tab, "Notes")
+
+        gallery_tab = QtWidgets.QWidget()
+        gallery_v = QtWidgets.QVBoxLayout(gallery_tab); gallery_v.setContentsMargins(0, 0, 0, 0); gallery_v.setSpacing(6)
+        g_tools = QtWidgets.QHBoxLayout()
+        self.btn_gallery_import = QtWidgets.QToolButton(text="Import Image")
+        self.btn_gallery_import.setObjectName("navbtn")
+        self.btn_gallery_prev = QtWidgets.QToolButton(text="◀ Prev")
+        self.btn_gallery_prev.setObjectName("navbtn")
+        self.btn_gallery_next = QtWidgets.QToolButton(text="Next ▶")
+        self.btn_gallery_next.setObjectName("navbtn")
+        self.gallery_caption = QtWidgets.QLabel("No image selected")
+        self.gallery_caption.setStyleSheet("color:#7CE3C2; font-weight:700;")
+        g_tools.addWidget(self.gallery_caption)
+        g_tools.addStretch(1)
+        for b in (self.btn_gallery_import, self.btn_gallery_prev, self.btn_gallery_next):
+            g_tools.addWidget(b)
+        gallery_v.addLayout(g_tools)
+
+        g_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.gallery_list = QtWidgets.QListWidget()
+        self.gallery_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        g_split.addWidget(self.gallery_list)
+        self.gallery_viewer = ImageViewer(self)
+        g_split.addWidget(self.gallery_viewer)
+        g_split.setStretchFactor(0, 1)
+        g_split.setStretchFactor(1, 3)
+        gallery_v.addWidget(g_split, 1)
+
+        self.workspace_tabs.addTab(gallery_tab, "Gallery")
+        right_v.addWidget(self.workspace_tabs, 1)
         split.addWidget(right)
         split.setStretchFactor(0, 2)
         split.setStretchFactor(1, 3)
@@ -522,24 +563,66 @@ class ProjectDetail(QtWidgets.QWidget):
         self.tree.request_import_image.connect(self._action_import_image)
         self.tree.request_delete.connect(self._action_delete)
 
-        # çift tıklayınca türüne göre aç
+        # tek/çift tıklama ile aç
+        self.tree.clicked.connect(self._open_item)
         self.tree.doubleClicked.connect(self._open_item)
 
         self.btn_attach.clicked.connect(self._action_attach_file)
         self.btn_insert_img.clicked.connect(self._action_insert_image)
         self.btn_save.clicked.connect(self._save)
+        self.btn_gallery_import.clicked.connect(lambda: self._action_import_image(self.gallery_dir))
+        self.btn_gallery_prev.clicked.connect(self._gallery_prev)
+        self.btn_gallery_next.clicked.connect(self._gallery_next)
+        self.gallery_list.itemSelectionChanged.connect(self._gallery_from_selection)
 
         self._ensure_project_skeleton()
+        self._refresh_gallery()
         self._open_note(self._note_path)
 
     def _ensure_project_skeleton(self):
         for rel in ("notes", "files", "assets/images"):
             (self.proj_dir / rel).mkdir(parents=True, exist_ok=True)
-        if not (self.proj_dir / "overview.md").exists():
-            (self.proj_dir / "overview.md").write_text(
+        if not (self.notes_dir / "overview.md").exists():
+            (self.notes_dir / "overview.md").write_text(
                 f"# {self.meta.get('name') or self.proj_dir.name}\n\n- Hedefler\n- Notlar\n- Sonraki adımlar\n",
                 encoding="utf-8"
             )
+        self._note_path = self.notes_dir / "overview.md"
+
+    def _resolve_inside_project(self, target: Path) -> Path | None:
+        return safe_child_path(self.proj_dir, target)
+
+    def _resolve_note_target_dir(self, target_dir: Path) -> Path:
+        if target_dir.is_file():
+            target_dir = target_dir.parent
+        safe_target = self._resolve_inside_project(target_dir)
+        if safe_target is None:
+            return self.notes_dir
+        try:
+            safe_target.relative_to(self.notes_dir)
+            return safe_target
+        except Exception:
+            return self.notes_dir
+
+    def _resolve_gallery_target_dir(self, target_dir: Path) -> Path:
+        if target_dir.is_file():
+            target_dir = target_dir.parent
+        safe_target = self._resolve_inside_project(target_dir)
+        if safe_target is None:
+            return self.gallery_dir
+        try:
+            safe_target.relative_to(self.gallery_dir)
+            return safe_target
+        except Exception:
+            return self.gallery_dir
+
+    def _next_note_name(self) -> str:
+        i = 1
+        while True:
+            candidate = self.notes_dir / f"note-{i}.md"
+            if not candidate.exists():
+                return candidate.stem
+            i += 1
 
     def _on_editor_changed(self):
         if self._loading_note:
@@ -555,12 +638,16 @@ class ProjectDetail(QtWidgets.QWidget):
             self.preview.setPlainText(text)
 
     def _open_note(self, p: Path):
-        self._note_path = p
-        self.file_lbl.setText(str(p.relative_to(self.proj_dir)))
+        safe_note = self._resolve_inside_project(p)
+        if safe_note is None:
+            QtWidgets.QMessageBox.warning(self, "Open", "Geçersiz dosya yolu.")
+            return
+        self._note_path = safe_note
+        self.file_lbl.setText(str(safe_note.relative_to(self.proj_dir)))
         self._loading_note = True
         try:
             try:
-                self.editor.setPlainText(p.read_text(encoding="utf-8"))
+                self.editor.setPlainText(safe_note.read_text(encoding="utf-8"))
             except Exception:
                 self.editor.setPlainText("")
             self._update_preview()
@@ -574,13 +661,13 @@ class ProjectDetail(QtWidgets.QWidget):
         p = Path(self.fs_model.filePath(src_idx))
         if p.is_file() and is_textish_file(p):
             try:
+                self.workspace_tabs.setCurrentIndex(0)
                 self._open_note(p)
             except Exception as ex:
                 QtWidgets.QMessageBox.warning(self, "Open", f"Açılamadı:\n{ex}")
         elif p.is_file() and is_image_file(p):
-            self.viewer.load(p)
-            self.stack.setCurrentWidget(self.viewer)
-            self.file_lbl.setText(str(p.relative_to(self.proj_dir)))
+            self.workspace_tabs.setCurrentIndex(1)
+            self._open_gallery_path(p)
         else:
             # desteklenmeyen dosya: editörde ham metin olarak göstermeyi deneyebiliriz
             if p.is_file():
@@ -596,16 +683,16 @@ class ProjectDetail(QtWidgets.QWidget):
             self._note_path.write_text(self.editor.toPlainText(), encoding="utf-8")
             self.meta["updated_at"] = now_iso()
             write_json(self.proj_dir / META_DIR / META_FILE, self.meta)
-        except Exception:
-            pass
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "Save", f"Kaydedilemedi:\n{ex}")
 
     # ---- Context actions ----
     def _action_new_note(self, target_dir: Path):
-        if target_dir.is_file():
-            target_dir = target_dir.parent
+        target_dir = self._resolve_note_target_dir(target_dir)
         name, ok = QtWidgets.QInputDialog.getText(
             self, "New Note",
-            "Note name:"
+            "Note name:",
+            text=self._next_note_name(),
         )
         if not ok or not name.strip(): return
         path = target_dir / name.strip()
@@ -620,6 +707,7 @@ class ProjectDetail(QtWidgets.QWidget):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"# {path.stem}\n", encoding="utf-8")
             self._open_note(path)
+            self.tree.expand(self.proxy.mapFromSource(self.fs_model.index(str(path.parent))))
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "New Note", f"Oluşturulamadı:\n{ex}")
 
@@ -642,10 +730,12 @@ class ProjectDetail(QtWidgets.QWidget):
         )
         if not fn: return
         src = Path(fn)
+        target_dir = self._resolve_gallery_target_dir(target_dir)
         dst = ensure_unique_path(target_dir / src.name)
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
+            self._refresh_gallery(dst)
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "Import Image", f"Kopyalanamadı:\n{ex}")
 
@@ -668,6 +758,9 @@ class ProjectDetail(QtWidgets.QWidget):
         try:
             if path.is_dir(): shutil.rmtree(path)
             else: path.unlink(missing_ok=True)
+            if not path.exists() and path == self._note_path:
+                self._open_note(self.notes_dir / "overview.md")
+            self._refresh_gallery()
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "Delete", f"Silinemedi:\n{ex}")
 
@@ -692,7 +785,7 @@ class ProjectDetail(QtWidgets.QWidget):
         if not fn:
             return
         src = Path(fn)
-        dst = ensure_unique_path(self.proj_dir / "assets" / "images" / src.name)
+        dst = ensure_unique_path(self.gallery_dir / src.name)
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
@@ -700,8 +793,63 @@ class ProjectDetail(QtWidgets.QWidget):
             cur = self.editor.textCursor()
             cur.insertText(f"\n![{src.stem}]({rel})\n")
             self.editor.setTextCursor(cur)
+            self._refresh_gallery(dst)
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "Insert Image", f"Eklenemedi:\n{ex}")
+
+    def _refresh_gallery(self, prefer: Path | None = None):
+        self.gallery_dir.mkdir(parents=True, exist_ok=True)
+        self._gallery_files = sorted([p for p in self.gallery_dir.rglob("*") if p.is_file() and is_image_file(p)])
+        self.gallery_list.blockSignals(True)
+        self.gallery_list.clear()
+        for p in self._gallery_files:
+            rel = p.relative_to(self.gallery_dir).as_posix()
+            it = QtWidgets.QListWidgetItem(rel)
+            it.setData(QtCore.Qt.UserRole, p)
+            self.gallery_list.addItem(it)
+        self.gallery_list.blockSignals(False)
+        if not self._gallery_files:
+            self._gallery_index = -1
+            self.gallery_caption.setText("No image selected")
+            return
+        pick = prefer if prefer in self._gallery_files else self._gallery_files[0]
+        self._open_gallery_path(pick)
+
+    def _open_gallery_path(self, p: Path):
+        safe_img = self._resolve_inside_project(p)
+        if safe_img is None:
+            QtWidgets.QMessageBox.warning(self, "Gallery", "Geçersiz dosya yolu.")
+            return
+        if safe_img not in self._gallery_files:
+            self._refresh_gallery(safe_img)
+            return
+        self._gallery_index = self._gallery_files.index(safe_img)
+        self.gallery_viewer.load(safe_img)
+        self.gallery_caption.setText(str(safe_img.relative_to(self.proj_dir)))
+        for i in range(self.gallery_list.count()):
+            if self.gallery_list.item(i).data(QtCore.Qt.UserRole) == safe_img:
+                self.gallery_list.setCurrentRow(i)
+                break
+
+    def _gallery_from_selection(self):
+        it = self.gallery_list.currentItem()
+        if not it:
+            return
+        p = it.data(QtCore.Qt.UserRole)
+        if p:
+            self._open_gallery_path(p)
+
+    def _gallery_prev(self):
+        if not self._gallery_files:
+            return
+        self._gallery_index = (self._gallery_index - 1) % len(self._gallery_files)
+        self._open_gallery_path(self._gallery_files[self._gallery_index])
+
+    def _gallery_next(self):
+        if not self._gallery_files:
+            return
+        self._gallery_index = (self._gallery_index + 1) % len(self._gallery_files)
+        self._open_gallery_path(self._gallery_files[self._gallery_index])
 
 # ----------------- Tür klasör karosu (Overview / klasör grid) -----------------
 class TypeTile(QtWidgets.QFrame):
@@ -988,7 +1136,7 @@ class ProjectsPage(QtWidgets.QWidget):
         # Çalışma sayfası iskeleti (boş proje açınca not ekleme hep hazır olsun)
         for rel in ("notes", "files", "assets/images"):
             (pdir / rel).mkdir(parents=True, exist_ok=True)
-        (pdir / "overview.md").write_text(
+        (pdir / "notes" / "overview.md").write_text(
             f"# {name}\n\n- Hedefler\n- Notlar\n- Sonraki adımlar\n",
             encoding="utf-8"
         )
