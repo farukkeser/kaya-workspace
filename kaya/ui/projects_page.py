@@ -88,6 +88,16 @@ def ensure_unique_path(p: Path) -> Path:
 def is_image_file(path: Path) -> bool:
     return path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 
+def is_textish_file(path: Path) -> bool:
+    return path.suffix.lower() in {".md", ".txt", ".json", ".py", ".js", ".ts", ".html", ".css", ".csv", ".yaml", ".yml"}
+
+def safe_child_path(root: Path, candidate: Path) -> Path | None:
+    try:
+        candidate.resolve().relative_to(root.resolve())
+        return candidate
+    except Exception:
+        return None
+
 def slugify(name: str) -> str:
     # Windows yasaklı karakterleri temizle, boşlukları tire yap
     name = re.sub(r'[\\/*?:"<>|]+', '', name)
@@ -439,12 +449,17 @@ class ProjectDetail(QtWidgets.QWidget):
     back_requested = QtCore.Signal()
     def __init__(self, proj_dir: Path, meta: dict, parent=None):
         super().__init__(parent)
-        self.proj_dir = proj_dir; self.meta = meta
+        self.proj_dir = proj_dir
+        self.meta = dict(DEFAULT_META)
+        self.meta.update(meta or {})
+        if not self.meta.get("name"):
+            self.meta["name"] = proj_dir.name
+        self._loading_note = False
 
         outer = QtWidgets.QVBoxLayout(self); outer.setContentsMargins(8,8,8,8); outer.setSpacing(8)
         top = QtWidgets.QHBoxLayout()
         back = QtWidgets.QToolButton(text="← Back"); back.setObjectName("navbtn"); back.clicked.connect(self.back_requested.emit)
-        title = QtWidgets.QLabel(meta.get("name") or proj_dir.name)
+        title = QtWidgets.QLabel(self.meta.get("name") or proj_dir.name)
         f = title.font(); f.setBold(True); f.setPointSizeF(f.pointSizeF()+2); title.setFont(f)
         top.addWidget(back); top.addSpacing(8); top.addWidget(title); top.addStretch(1)
         outer.addLayout(top)
@@ -461,21 +476,34 @@ class ProjectDetail(QtWidgets.QWidget):
         self.tree = ProjectTree(proj_dir, self.fs_model, self.proxy, self)
         split.addWidget(self.tree)
 
-        # Sağ taraf: Stacked (Editor | ImageViewer)
+        # Sağ taraf: Not çalışma alanı + görsel görüntüleyici
         right = QtWidgets.QWidget()
         right_v = QtWidgets.QVBoxLayout(right); right_v.setContentsMargins(0,0,0,0); right_v.setSpacing(6)
 
+        tools = QtWidgets.QHBoxLayout()
+        self.file_lbl = QtWidgets.QLabel("overview.md")
+        self.file_lbl.setStyleSheet("color:#7CE3C2; font-weight:700;")
+        tools.addWidget(QtWidgets.QLabel("Active note:"))
+        tools.addWidget(self.file_lbl)
+        tools.addStretch(1)
+        right_v.addLayout(tools)
+
         self.stack = QtWidgets.QStackedWidget()
-        # 0) Editor
+        # 0) Editor workspace (Editor + Preview)
+        self.editor_workspace = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         self.editor = QtWidgets.QPlainTextEdit(placeholderText="Proje notu…")
+        self.editor.setTabStopDistance(24)
+        self.preview = QtWidgets.QTextBrowser()
+        self.preview.setOpenExternalLinks(False)
+        self.preview.setReadOnly(True)
+        self.editor_workspace.addWidget(self.editor)
+        self.editor_workspace.addWidget(self.preview)
+        self.editor_workspace.setSizes([520, 240])
         self._tm = QtCore.QTimer(self); self._tm.setInterval(600); self._tm.setSingleShot(True)
         self._tm.timeout.connect(self._save)
         self._note_path = proj_dir / "overview.md"
-        if self._note_path.exists():
-            try: self.editor.setPlainText(self._note_path.read_text(encoding="utf-8"))
-            except Exception: pass
-        self.editor.textChanged.connect(lambda: self._tm.start())
-        self.stack.addWidget(self.editor)
+        self.editor.textChanged.connect(self._on_editor_changed)
+        self.stack.addWidget(self.editor_workspace)
 
         # 1) ImageViewer
         self.viewer = ImageViewer(self)
@@ -497,27 +525,63 @@ class ProjectDetail(QtWidgets.QWidget):
         # çift tıklayınca türüne göre aç
         self.tree.doubleClicked.connect(self._open_item)
 
+        self._ensure_project_skeleton()
+        self._open_note(self._note_path)
+
+    def _ensure_project_skeleton(self):
+        for rel in ("notes", "files", "assets/images"):
+            (self.proj_dir / rel).mkdir(parents=True, exist_ok=True)
+        if not (self.proj_dir / "overview.md").exists():
+            (self.proj_dir / "overview.md").write_text(
+                f"# {self.meta.get('name') or self.proj_dir.name}\n\n- Hedefler\n- Notlar\n- Sonraki adımlar\n",
+                encoding="utf-8"
+            )
+
+    def _on_editor_changed(self):
+        if self._loading_note:
+            return
+        self._update_preview()
+        self._tm.start()
+
+    def _update_preview(self):
+        text = self.editor.toPlainText()
+        if self._note_path.suffix.lower() == ".md":
+            self.preview.setMarkdown(text)
+        else:
+            self.preview.setPlainText(text)
+
+    def _open_note(self, p: Path):
+        self._note_path = p
+        self.file_lbl.setText(str(p.relative_to(self.proj_dir)))
+        self._loading_note = True
+        try:
+            try:
+                self.editor.setPlainText(p.read_text(encoding="utf-8"))
+            except Exception:
+                self.editor.setPlainText("")
+            self._update_preview()
+            self.stack.setCurrentWidget(self.editor_workspace)
+        finally:
+            self._loading_note = False
+
     # --- açma mantığı: metin mi görsel mi? ---
     def _open_item(self, idx: QtCore.QModelIndex):
         src_idx = self.proxy.mapToSource(idx)
         p = Path(self.fs_model.filePath(src_idx))
-        if p.is_file() and p.suffix.lower() in {".md", ".txt"}:
+        if p.is_file() and is_textish_file(p):
             try:
-                self.editor.setPlainText(p.read_text(encoding="utf-8"))
-                self._note_path = p
-                self.stack.setCurrentWidget(self.editor)
+                self._open_note(p)
             except Exception as ex:
                 QtWidgets.QMessageBox.warning(self, "Open", f"Açılamadı:\n{ex}")
         elif p.is_file() and is_image_file(p):
             self.viewer.load(p)
             self.stack.setCurrentWidget(self.viewer)
+            self.file_lbl.setText(str(p.relative_to(self.proj_dir)))
         else:
             # desteklenmeyen dosya: editörde ham metin olarak göstermeyi deneyebiliriz
             if p.is_file():
                 try:
-                    self.editor.setPlainText(p.read_text(encoding="utf-8"))
-                    self._note_path = p
-                    self.stack.setCurrentWidget(self.editor)
+                    self._open_note(p)
                 except Exception:
                     QtWidgets.QMessageBox.information(self, "Open", f"Desteklenmeyen biçim: {p.suffix}")
             # klasöre çift tık: hiçbir şey yapma
@@ -526,6 +590,8 @@ class ProjectDetail(QtWidgets.QWidget):
         try:
             self._note_path.parent.mkdir(parents=True, exist_ok=True)
             self._note_path.write_text(self.editor.toPlainText(), encoding="utf-8")
+            self.meta["updated_at"] = now_iso()
+            write_json(self.proj_dir / META_DIR / META_FILE, self.meta)
         except Exception:
             pass
 
@@ -540,6 +606,10 @@ class ProjectDetail(QtWidgets.QWidget):
         path = target_dir / raw
         if path.suffix == "":
             path = path.with_suffix(".md")  # varsayılanlaşır
+        path = safe_child_path(self.proj_dir, path)
+        if path is None:
+            QtWidgets.QMessageBox.warning(self, "New File", "Geçersiz yol. Proje dışına çıkılamaz.")
+            return
         path = ensure_unique_path(path)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -547,13 +617,18 @@ class ProjectDetail(QtWidgets.QWidget):
                 path.write_text("# New note\n", encoding="utf-8")
             else:
                 path.write_text("", encoding="utf-8")
+            self._open_note(path)
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "New File", f"Oluşturulamadı:\n{ex}")
 
     def _action_new_dir(self, target_dir: Path):
         name, ok = QtWidgets.QInputDialog.getText(self, "New Folder", "Folder name:")
         if not ok or not name.strip(): return
-        path = ensure_unique_path(target_dir / name.strip())
+        path = safe_child_path(self.proj_dir, target_dir / name.strip())
+        if path is None:
+            QtWidgets.QMessageBox.warning(self, "New Folder", "Geçersiz yol. Proje dışına çıkılamaz.")
+            return
+        path = ensure_unique_path(path)
         try:
             path.mkdir(parents=True, exist_ok=True)
         except Exception as ex:
@@ -593,6 +668,7 @@ class ProjectDetail(QtWidgets.QWidget):
             else: path.unlink(missing_ok=True)
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "Delete", f"Silinemedi:\n{ex}")
+
 
 # ----------------- Tür klasör karosu (Overview / klasör grid) -----------------
 class TypeTile(QtWidgets.QFrame):
@@ -723,7 +799,8 @@ class ProjectsPage(QtWidgets.QWidget):
         self.projects_dir.mkdir(parents=True, exist_ok=True)
 
         outer = QtWidgets.QVBoxLayout(self); outer.setContentsMargins(8,8,8,8); outer.setSpacing(8)
-        hdr = QtWidgets.QHBoxLayout()
+        self.hdr_wrap = QtWidgets.QWidget()
+        hdr = QtWidgets.QHBoxLayout(self.hdr_wrap); hdr.setContentsMargins(0,0,0,0)
         self.btn_over = QtWidgets.QToolButton(text="Overview")
         self.btn_all  = QtWidgets.QToolButton(text="All")
         for b in (self.btn_over, self.btn_all):
@@ -734,7 +811,7 @@ class ProjectsPage(QtWidgets.QWidget):
         self.new_btn = QtWidgets.QToolButton(text="New Project"); self.new_btn.setObjectName("navbtn")
         hdr.addWidget(self.btn_over); hdr.addWidget(self.btn_all); hdr.addSpacing(10)
         hdr.addWidget(self.search, 1); hdr.addSpacing(10); hdr.addWidget(self.new_btn)
-        outer.addLayout(hdr)
+        outer.addWidget(self.hdr_wrap)
 
         # ana stack: Overview / All
         self.stack = QtWidgets.QStackedWidget(); outer.addWidget(self.stack, 1)
@@ -760,6 +837,14 @@ class ProjectsPage(QtWidgets.QWidget):
         all_l = QtWidgets.QVBoxLayout(self.page_all); all_l.setContentsMargins(0,0,0,0); all_l.setSpacing(6)
         self.all_list = AllList(); all_l.addWidget(self.all_list, 1)
         self.stack.addWidget(self.over_stack); self.stack.addWidget(self.page_all)
+
+        self.page_detail = QtWidgets.QWidget()
+        self._detail_layout = QtWidgets.QVBoxLayout(self.page_detail)
+        self._detail_layout.setContentsMargins(0,0,0,0)
+        self._detail_layout.setSpacing(0)
+        self._detail_widget = None
+        self._list_page_index = 0
+        self.stack.addWidget(self.page_detail)
 
         for view in (self.all_list, self.type_list):
             view.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -867,7 +952,13 @@ class ProjectsPage(QtWidgets.QWidget):
         meta["created_at"]=now_iso(); meta["updated_at"]=meta["created_at"]
         (pdir / META_DIR).mkdir(parents=True, exist_ok=True)
         write_json(pdir / META_DIR / META_FILE, meta)
-        # NOT: artık notes/ ve overview.md yaratmıyoruz → BOŞ BAŞLAR
+        # Çalışma sayfası iskeleti (boş proje açınca not ekleme hep hazır olsun)
+        for rel in ("notes", "files", "assets/images"):
+            (pdir / rel).mkdir(parents=True, exist_ok=True)
+        (pdir / "overview.md").write_text(
+            f"# {name}\n\n- Hedefler\n- Notlar\n- Sonraki adımlar\n",
+            encoding="utf-8"
+        )
         self._refresh()
 
     def _copy_tree(self, src: Path, dst: Path):
@@ -884,11 +975,19 @@ class ProjectsPage(QtWidgets.QWidget):
         if not meta_path.exists():
             meta_path = proj_dir / META_FILE
         meta=read_json(meta_path, DEFAULT_META)
-        detail=ProjectDetail(proj_dir, meta, self)
-        dlg=QtWidgets.QDialog(self); dlg.setWindowTitle(meta.get("name") or proj_dir.name)
-        lay=QtWidgets.QVBoxLayout(dlg); lay.setContentsMargins(0,0,0,0); lay.addWidget(detail)
-        detail.back_requested.connect(dlg.reject)
-        dlg.resize(1000,640); dlg.exec()
+        self._list_page_index = self.stack.currentIndex()
+        if getattr(self, "_detail_widget", None) is not None:
+            self._detail_widget.setParent(None)
+            self._detail_widget.deleteLater()
+        self._detail_widget = ProjectDetail(proj_dir, meta, self)
+        self._detail_layout.addWidget(self._detail_widget)
+        self._detail_widget.back_requested.connect(self._close_project)
+        self.stack.setCurrentWidget(self.page_detail)
+        self.hdr_wrap.hide()
+
+    def _close_project(self):
+        self.stack.setCurrentIndex(getattr(self, "_list_page_index", 0))
+        self.hdr_wrap.show()
         self._refresh()
 
     # ------------- proje sil -------------
