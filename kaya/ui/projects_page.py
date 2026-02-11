@@ -346,6 +346,7 @@ class ProjectTree(QtWidgets.QTreeView):
     def _ctx_menu(self, pos: QtCore.QPoint):
         idx = self.indexAt(pos)
         target_dir = self._target_dir_for_index(idx)
+        clicked_path = self._path_from_index(idx) if idx.isValid() else None
         menu = QtWidgets.QMenu(self)
         a_new_note = menu.addAction("New Note (.md)")
         a_new_dir  = menu.addAction("New Folder")
@@ -360,9 +361,11 @@ class ProjectTree(QtWidgets.QTreeView):
         elif act == a_img:
             self.request_import_image.emit(target_dir)
         elif act == a_del:
-            sel = self.selectedIndexes()
-            if sel:
-                p = self._path_from_index(sel[0])
+            p = clicked_path
+            if p is None:
+                sel = self.selectedIndexes()
+                p = self._path_from_index(sel[0]) if sel else None
+            if p is not None:
                 self.request_delete.emit(p)
 
     # ---- Drag & Drop ----
@@ -589,6 +592,14 @@ class ProjectDetail(QtWidgets.QWidget):
             )
         self._note_path = self.notes_dir / "overview.md"
 
+    def _refresh_tree(self):
+        """QFileSystemModel bazen dosya sistemi değişikliklerini gecikmeli yakalar.
+        Not/folder işlemlerinden sonra kökü yeniden ayarlayarak anlık görünüm sağlarız.
+        """
+        self.fs_model.setRootPath(str(self.proj_dir))
+        root_src = self.fs_model.index(str(self.proj_dir))
+        self.tree.setRootIndex(self.proxy.mapFromSource(root_src))
+
     def _resolve_inside_project(self, target: Path) -> Path | None:
         return safe_child_path(self.proj_dir, target)
 
@@ -706,8 +717,10 @@ class ProjectDetail(QtWidgets.QWidget):
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"# {path.stem}\n", encoding="utf-8")
+            self._refresh_tree()
             self._open_note(path)
             self.tree.expand(self.proxy.mapFromSource(self.fs_model.index(str(path.parent))))
+            self.tree.setCurrentIndex(self.proxy.mapFromSource(self.fs_model.index(str(path))))
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "New Note", f"Oluşturulamadı:\n{ex}")
 
@@ -721,21 +734,27 @@ class ProjectDetail(QtWidgets.QWidget):
         path = ensure_unique_path(path)
         try:
             path.mkdir(parents=True, exist_ok=True)
+            self._refresh_tree()
+            self.tree.expand(self.proxy.mapFromSource(self.fs_model.index(str(path.parent))))
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "New Folder", f"Oluşturulamadı:\n{ex}")
 
     def _action_import_image(self, target_dir: Path):
-        fn, _ = QtWidgets.QFileDialog.getOpenFileName(
+        files, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self, "Import Image", "", "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;All Files (*.*)"
         )
-        if not fn: return
-        src = Path(fn)
+        if not files: return
         target_dir = self._resolve_gallery_target_dir(target_dir)
-        dst = ensure_unique_path(target_dir / src.name)
         try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            self._refresh_gallery(dst)
+            last_dst = None
+            for fn in files:
+                src = Path(fn)
+                dst = ensure_unique_path(target_dir / src.name)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                last_dst = dst
+            self._refresh_tree()
+            self._refresh_gallery(last_dst)
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "Import Image", f"Kopyalanamadı:\n{ex}")
 
@@ -758,6 +777,7 @@ class ProjectDetail(QtWidgets.QWidget):
         try:
             if path.is_dir(): shutil.rmtree(path)
             else: path.unlink(missing_ok=True)
+            self._refresh_tree()
             if not path.exists() and path == self._note_path:
                 self._open_note(self.notes_dir / "overview.md")
             self._refresh_gallery()
