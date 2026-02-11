@@ -455,7 +455,7 @@ class ProjectDetail(QtWidgets.QWidget):
         outer = QtWidgets.QVBoxLayout(self); outer.setContentsMargins(8,8,8,8); outer.setSpacing(8)
         top = QtWidgets.QHBoxLayout()
         back = QtWidgets.QToolButton(text="← Back"); back.setObjectName("navbtn"); back.clicked.connect(self.back_requested.emit)
-        title = QtWidgets.QLabel(meta.get("name") or proj_dir.name)
+        title = QtWidgets.QLabel(self.meta.get("name") or proj_dir.name)
         f = title.font(); f.setBold(True); f.setPointSizeF(f.pointSizeF()+2); title.setFont(f)
         top.addWidget(back); top.addSpacing(8); top.addWidget(title); top.addStretch(1)
         outer.addLayout(top)
@@ -843,7 +843,8 @@ class ProjectsPage(QtWidgets.QWidget):
         self.projects_dir.mkdir(parents=True, exist_ok=True)
 
         outer = QtWidgets.QVBoxLayout(self); outer.setContentsMargins(8,8,8,8); outer.setSpacing(8)
-        hdr = QtWidgets.QHBoxLayout()
+        self.hdr_wrap = QtWidgets.QWidget()
+        hdr = QtWidgets.QHBoxLayout(self.hdr_wrap); hdr.setContentsMargins(0,0,0,0)
         self.btn_over = QtWidgets.QToolButton(text="Overview")
         self.btn_all  = QtWidgets.QToolButton(text="All")
         for b in (self.btn_over, self.btn_all):
@@ -854,7 +855,7 @@ class ProjectsPage(QtWidgets.QWidget):
         self.new_btn = QtWidgets.QToolButton(text="New Project"); self.new_btn.setObjectName("navbtn")
         hdr.addWidget(self.btn_over); hdr.addWidget(self.btn_all); hdr.addSpacing(10)
         hdr.addWidget(self.search, 1); hdr.addSpacing(10); hdr.addWidget(self.new_btn)
-        outer.addLayout(hdr)
+        outer.addWidget(self.hdr_wrap)
 
         # ana stack: Overview / All
         self.stack = QtWidgets.QStackedWidget(); outer.addWidget(self.stack, 1)
@@ -880,6 +881,14 @@ class ProjectsPage(QtWidgets.QWidget):
         all_l = QtWidgets.QVBoxLayout(self.page_all); all_l.setContentsMargins(0,0,0,0); all_l.setSpacing(6)
         self.all_list = AllList(); all_l.addWidget(self.all_list, 1)
         self.stack.addWidget(self.over_stack); self.stack.addWidget(self.page_all)
+
+        self.page_detail = QtWidgets.QWidget()
+        self._detail_layout = QtWidgets.QVBoxLayout(self.page_detail)
+        self._detail_layout.setContentsMargins(0,0,0,0)
+        self._detail_layout.setSpacing(0)
+        self._detail_widget = None
+        self._list_page_index = 0
+        self.stack.addWidget(self.page_detail)
 
         for view in (self.all_list, self.type_list):
             view.setFocusPolicy(QtCore.Qt.NoFocus)
@@ -1010,11 +1019,19 @@ class ProjectsPage(QtWidgets.QWidget):
         if not meta_path.exists():
             meta_path = proj_dir / META_FILE
         meta=read_json(meta_path, DEFAULT_META)
-        detail=ProjectDetail(proj_dir, meta, self)
-        dlg=QtWidgets.QDialog(self); dlg.setWindowTitle(meta.get("name") or proj_dir.name)
-        lay=QtWidgets.QVBoxLayout(dlg); lay.setContentsMargins(0,0,0,0); lay.addWidget(detail)
-        detail.back_requested.connect(dlg.reject)
-        dlg.resize(1000,640); dlg.exec()
+        self._list_page_index = self.stack.currentIndex()
+        if getattr(self, "_detail_widget", None) is not None:
+            self._detail_widget.setParent(None)
+            self._detail_widget.deleteLater()
+        self._detail_widget = ProjectDetail(proj_dir, meta, self)
+        self._detail_layout.addWidget(self._detail_widget)
+        self._detail_widget.back_requested.connect(self._close_project)
+        self.stack.setCurrentWidget(self.page_detail)
+        self.hdr_wrap.hide()
+
+    def _close_project(self):
+        self.stack.setCurrentIndex(getattr(self, "_list_page_index", 0))
+        self.hdr_wrap.show()
         self._refresh()
 
     # ------------- proje sil -------------
