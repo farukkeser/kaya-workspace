@@ -22,8 +22,6 @@ class Kaya(QtWidgets.QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.resize(1360, 860)
 
-        self._open_windows = []   # GC olmasın diye açık diyalogları tut
-
         paths = FSPaths(FILES, PROJECTS, AGENDA, MEDIA)
         self.fs = FSService(paths)
 
@@ -120,34 +118,22 @@ class Kaya(QtWidgets.QMainWindow):
         # Varsayılan komutlar
         register_default_commands(bus, self.fs, self)
 
-        # ---- UI hook: terminalden proje penceresi aç (merkezi sayfayı değiştirme) ----
+        # ---- UI hook: terminalden proje aç (tek pencere içinde Projeler sayfasına yönlendir) ----
         def ui_project_open(payload):
             from pathlib import Path
-            from PySide6 import QtCore
             dpath = Path(payload.get("path", ""))
 
             if not dpath.exists():
                 return "Path not found."
+            if not dpath.is_dir():
+                dpath = dpath.parent
 
             try:
-                from .projects_page import ProjectDetail
-                dlg = ProjectDetail(dpath, {"name": dpath.name})
-                dlg.setWindowFlag(QtCore.Qt.Window, True)
-                dlg.setWindowModality(QtCore.Qt.NonModal)
-                dlg.show()
-                try: self._open_windows.append(dlg)
-                except Exception: pass
-                return f'Opening "{dpath.name}"…'
-            except Exception as e1:
-                try:
-                    from .project_window import ProjectWindow
-                    dlg = ProjectWindow(dpath, self.fs, self)
-                    dlg.setModal(False); dlg.show()
-                    try: self._open_windows.append(dlg)
-                    except Exception: pass
-                    return f'Opening "{dpath.name}"…'
-                except Exception as e2:
-                    return f"Open failed: {e1} / {e2}"
+                self.stack.setCurrentWidget(self.p_proj)
+                self.p_proj.open_project(dpath)
+                return f'Opened "{dpath.name}" in Projects.'
+            except Exception as ex:
+                return f"Open failed: {ex}"
 
         bus.register("ui.project_open", ui_project_open)
 
