@@ -449,11 +449,7 @@ class ProjectDetail(QtWidgets.QWidget):
     back_requested = QtCore.Signal()
     def __init__(self, proj_dir: Path, meta: dict, parent=None):
         super().__init__(parent)
-        self.proj_dir = proj_dir
-        self.meta = dict(DEFAULT_META)
-        self.meta.update(meta or {})
-        if not self.meta.get("name"):
-            self.meta["name"] = proj_dir.name
+        self.proj_dir = proj_dir; self.meta = meta
         self._loading_note = False
 
         outer = QtWidgets.QVBoxLayout(self); outer.setContentsMargins(8,8,8,8); outer.setSpacing(8)
@@ -483,9 +479,20 @@ class ProjectDetail(QtWidgets.QWidget):
         tools = QtWidgets.QHBoxLayout()
         self.file_lbl = QtWidgets.QLabel("overview.md")
         self.file_lbl.setStyleSheet("color:#7CE3C2; font-weight:700;")
-        tools.addWidget(QtWidgets.QLabel("Active note:"))
+        self.btn_new_note = QtWidgets.QToolButton(text="+ Note")
+        self.btn_new_note.setObjectName("navbtn")
+        self.btn_new_folder = QtWidgets.QToolButton(text="+ Folder")
+        self.btn_new_folder.setObjectName("navbtn")
+        self.btn_attach = QtWidgets.QToolButton(text="Attach")
+        self.btn_attach.setObjectName("navbtn")
+        self.btn_insert_img = QtWidgets.QToolButton(text="Insert Image")
+        self.btn_insert_img.setObjectName("navbtn")
+        self.btn_save = QtWidgets.QToolButton(text="Save")
+        self.btn_save.setObjectName("navbtn")
         tools.addWidget(self.file_lbl)
         tools.addStretch(1)
+        for b in (self.btn_new_note, self.btn_new_folder, self.btn_attach, self.btn_insert_img, self.btn_save):
+            tools.addWidget(b)
         right_v.addLayout(tools)
 
         self.stack = QtWidgets.QStackedWidget()
@@ -524,6 +531,12 @@ class ProjectDetail(QtWidgets.QWidget):
 
         # çift tıklayınca türüne göre aç
         self.tree.doubleClicked.connect(self._open_item)
+
+        self.btn_new_note.clicked.connect(lambda: self._action_new_note(self.proj_dir / "notes"))
+        self.btn_new_folder.clicked.connect(lambda: self._action_new_dir(self.proj_dir))
+        self.btn_attach.clicked.connect(self._action_attach_file)
+        self.btn_insert_img.clicked.connect(self._action_insert_image)
+        self.btn_save.clicked.connect(self._save)
 
         self._ensure_project_skeleton()
         self._open_note(self._note_path)
@@ -669,6 +682,37 @@ class ProjectDetail(QtWidgets.QWidget):
         except Exception as ex:
             QtWidgets.QMessageBox.warning(self, "Delete", f"Silinemedi:\n{ex}")
 
+    def _action_attach_file(self):
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Attach File", "", "All Files (*.*)")
+        if not fn:
+            return
+        src = Path(fn)
+        dst = ensure_unique_path(self.proj_dir / "files" / src.name)
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "Attach", f"Eklenemedi:\n{ex}")
+
+    def _action_insert_image(self):
+        if self.stack.currentWidget() is self.viewer:
+            self.stack.setCurrentWidget(self.editor_workspace)
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Insert Image", "", "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;All Files (*.*)"
+        )
+        if not fn:
+            return
+        src = Path(fn)
+        dst = ensure_unique_path(self.proj_dir / "assets" / "images" / src.name)
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            rel = dst.relative_to(self._note_path.parent).as_posix()
+            cur = self.editor.textCursor()
+            cur.insertText(f"\n![{src.stem}]({rel})\n")
+            self.editor.setTextCursor(cur)
+        except Exception as ex:
+            QtWidgets.QMessageBox.warning(self, "Insert Image", f"Eklenemedi:\n{ex}")
 
 # ----------------- Tür klasör karosu (Overview / klasör grid) -----------------
 class TypeTile(QtWidgets.QFrame):
