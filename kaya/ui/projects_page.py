@@ -304,7 +304,7 @@ class FullscreenImageDialog(QtWidgets.QDialog):
 class ProjectTree(QtWidgets.QTreeView):
     """
     Proje gezgini: sürükle-bırak ile iç taşıma (aynı yere bırakınca kopya YOK),
-    dışarıdan dosya kopyalama; sağ tık menüsü: New Note, New File, New Folder, Import Image, Delete.
+    dışarıdan dosya kopyalama; sağ tık menüsü: New Note, New Folder, Import Image, Delete.
     """
     request_new_note = QtCore.Signal(Path)
     request_new_dir  = QtCore.Signal(Path)
@@ -346,7 +346,6 @@ class ProjectTree(QtWidgets.QTreeView):
         target_dir = self._target_dir_for_index(idx)
         menu = QtWidgets.QMenu(self)
         a_new_note = menu.addAction("New Note (.md)")
-        a_new_file = menu.addAction("New File…")
         a_new_dir  = menu.addAction("New Folder")
         a_img      = menu.addAction("Import Image…")
         menu.addSeparator()
@@ -354,8 +353,6 @@ class ProjectTree(QtWidgets.QTreeView):
         act = menu.exec(self.viewport().mapToGlobal(pos))
         if act == a_new_note:
             self.request_new_note.emit(target_dir)
-        elif act == a_new_file:
-            self.request_new_note.emit(target_dir)  # handler içinde uzantısızsa .md düşeceğiz
         elif act == a_new_dir:
             self.request_new_dir.emit(target_dir)
         elif act == a_img:
@@ -479,10 +476,6 @@ class ProjectDetail(QtWidgets.QWidget):
         tools = QtWidgets.QHBoxLayout()
         self.file_lbl = QtWidgets.QLabel("overview.md")
         self.file_lbl.setStyleSheet("color:#7CE3C2; font-weight:700;")
-        self.btn_new_note = QtWidgets.QToolButton(text="+ Note")
-        self.btn_new_note.setObjectName("navbtn")
-        self.btn_new_folder = QtWidgets.QToolButton(text="+ Folder")
-        self.btn_new_folder.setObjectName("navbtn")
         self.btn_attach = QtWidgets.QToolButton(text="Attach")
         self.btn_attach.setObjectName("navbtn")
         self.btn_insert_img = QtWidgets.QToolButton(text="Insert Image")
@@ -491,7 +484,7 @@ class ProjectDetail(QtWidgets.QWidget):
         self.btn_save.setObjectName("navbtn")
         tools.addWidget(self.file_lbl)
         tools.addStretch(1)
-        for b in (self.btn_new_note, self.btn_new_folder, self.btn_attach, self.btn_insert_img, self.btn_save):
+        for b in (self.btn_attach, self.btn_insert_img, self.btn_save):
             tools.addWidget(b)
         right_v.addLayout(tools)
 
@@ -532,8 +525,6 @@ class ProjectDetail(QtWidgets.QWidget):
         # çift tıklayınca türüne göre aç
         self.tree.doubleClicked.connect(self._open_item)
 
-        self.btn_new_note.clicked.connect(lambda: self._action_new_note(self.proj_dir / "notes"))
-        self.btn_new_folder.clicked.connect(lambda: self._action_new_dir(self.proj_dir))
         self.btn_attach.clicked.connect(self._action_attach_file)
         self.btn_insert_img.clicked.connect(self._action_insert_image)
         self.btn_save.clicked.connect(self._save)
@@ -610,29 +601,27 @@ class ProjectDetail(QtWidgets.QWidget):
 
     # ---- Context actions ----
     def _action_new_note(self, target_dir: Path):
+        if target_dir.is_file():
+            target_dir = target_dir.parent
         name, ok = QtWidgets.QInputDialog.getText(
-            self, "New File",
-            "File name (ör. notes/todo.md, design.txt, data.json):"
+            self, "New Note",
+            "Note name:"
         )
         if not ok or not name.strip(): return
-        raw = name.strip()
-        path = target_dir / raw
-        if path.suffix == "":
-            path = path.with_suffix(".md")  # varsayılanlaşır
+        path = target_dir / name.strip()
+        if path.suffix.lower() != ".md":
+            path = path.with_suffix(".md")
         path = safe_child_path(self.proj_dir, path)
         if path is None:
-            QtWidgets.QMessageBox.warning(self, "New File", "Geçersiz yol. Proje dışına çıkılamaz.")
+            QtWidgets.QMessageBox.warning(self, "New Note", "Geçersiz yol. Proje dışına çıkılamaz.")
             return
         path = ensure_unique_path(path)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            if path.suffix.lower() == ".md":
-                path.write_text("# New note\n", encoding="utf-8")
-            else:
-                path.write_text("", encoding="utf-8")
+            path.write_text(f"# {path.stem}\n", encoding="utf-8")
             self._open_note(path)
         except Exception as ex:
-            QtWidgets.QMessageBox.warning(self, "New File", f"Oluşturulamadı:\n{ex}")
+            QtWidgets.QMessageBox.warning(self, "New Note", f"Oluşturulamadı:\n{ex}")
 
     def _action_new_dir(self, target_dir: Path):
         name, ok = QtWidgets.QInputDialog.getText(self, "New Folder", "Folder name:")
